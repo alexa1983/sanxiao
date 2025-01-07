@@ -122,13 +122,7 @@ class BattlePlatform:
         self.buttons = {
             'refresh': Button("刷新列表", 30, 520, button_width, button_height, font=self.font),
             'create_room': Button("创建房间", start_x, first_row_y, 
-                                button_width, button_height, font=self.font),
-            'ready': Button("准备", start_x + button_width + button_spacing, first_row_y, 
-                           button_width, button_height, active=False, font=self.font),
-            'start': Button("开始游戏", start_x, right_panel_bottom, 
-                           button_width, button_height, active=False, font=self.font),
-            'leave': Button("离开房间", start_x + button_width + button_spacing, right_panel_bottom, 
-                           button_width, button_height, active=False, font=self.font)
+                                button_width, button_height, font=self.font)
         }
         
         # 缓存常用文本
@@ -140,6 +134,15 @@ class BattlePlatform:
         
         # 开始搜索局域网玩家
         self.start_discovery()
+        
+        # 添加更新计时器
+        self.last_update = 0
+        self.update_interval = 1.0  # 每秒更新一次
+        
+        self.rooms = {}  # 存储可见的房间
+        
+        # 创建房间浮窗
+        self.room_overlay = RoomOverlay(screen, network_manager, self.font)
         
     def start_discovery(self):
         """开始搜索局域网玩家"""
@@ -163,6 +166,16 @@ class BattlePlatform:
                 print(f"发现玩家出错: {e}")
                 
     def handle_event(self, event):
+        # 如果在房间中，优先处理房间事件
+        if self.network.current_room:
+            if self.room_overlay.handle_event(event):
+                if self.network.current_room.status == "游戏中":
+                    # 切换到游戏状态
+                    return "START_GAME"
+                # 如果返回True但不是开始游戏，表示离开房间
+                self.network.current_room = None
+            return
+        
         if event.type == pygame.MOUSEBUTTONDOWN:
             # 处理玩家列表点击
             if self.left_panel.collidepoint(event.pos):
@@ -170,11 +183,40 @@ class BattlePlatform:
                 index = int(list_y // 45)
                 if 0 <= index < len(self.online_players):
                     self.selected_player = list(self.online_players.values())[index]
+                    print(f"选中玩家: {self.selected_player}")
             
-            # 处理按钮点击
+            # 处理房间加入点击
+            elif self.right_panel.collidepoint(event.pos):
+                mouse_pos = event.pos
+                relative_y = mouse_pos[1] - self.right_panel.y
+                
+                # 遍历房间列表检查点击
+                y = 60
+                for room_id, room in self.rooms.items():
+                    if room.status == "等待中":  # 只处理等待中的房间
+                        join_button_rect = pygame.Rect(
+                            self.right_panel.x + 300,  # 加入按钮的x位置
+                            self.right_panel.y + y,    # 房间项的y位置
+                            50,                        # 按钮宽度
+                            25                         # 按钮高度
+                        )
+                        
+                        if join_button_rect.collidepoint(mouse_pos):
+                            print(f"尝试加入房间: {room_id}")
+                            if self.network.join_room(room_id, room.host.ip):
+                                self.current_room = room
+                                print(f"成功加入房间: {room_id}")
+                            break
+                    y += 60
+            
+            # 处理其他按钮点击
             for name, button in self.buttons.items():
                 if button.clicked(event.pos):
-                    self.handle_button_click(name)
+                    if name == 'refresh':
+                        self.network.broadcast_presence()
+                        self.update()
+                    else:
+                        self.handle_button_click(name)
                     
         elif event.type == pygame.MOUSEWHEEL:
             # 只在鼠标在玩家列表区域时处理滚动
@@ -233,6 +275,21 @@ class BattlePlatform:
         if self.current_room and not self.current_room.guest:
             self.network.send_invite(player.ip)
             
+    def update(self):
+        """更新游戏状态"""
+        current_time = time.time()
+        if current_time - self.last_update >= self.update_interval:
+            self.last_update = current_time
+            
+            # 更新玩家列表和房间列表
+            if self.network:
+                self.online_players = {p.ip: p for p in self.network.players}
+                self.rooms = self.network.rooms
+                
+                # 更新房间浮窗
+                if self.network.current_room:
+                    self.room_overlay.update()
+    
     def draw(self):
         # 绘制基础背景
         self.screen.blit(self.background, (0, 0))
@@ -248,36 +305,91 @@ class BattlePlatform:
         # 绘制玩家列表到左面板
         self.left_surface.fill((40, 40, 60))
         y = 10 - self.scroll_offset
+        
+        # 使用online_players字典而不是network.players
         for player in self.online_players.values():
             if y + 40 >= 0 and y <= 500:
                 if player == self.selected_player:
                     pygame.draw.rect(self.left_surface, (60, 60, 80),
                                    (5, y, 370, 35))
                 
-                name = self.small_font.render(player.name, True, (255, 255, 255))
-                status = self.small_font.render(player.status, True,
-                                              (100, 255, 100) if player.status == "在线"
-                                              else (255, 100, 100))
+                # 绘制玩家信息
+                name_text = self.small_font.render(f"{player.name}", True, (255, 255, 255))
+                ip_text = self.small_font.render(f"{player.ip}", True, (200, 200, 200))
+                status_text = self.small_font.render(player.status, True,
+                                                   (100, 255, 100) if player.status == "在线"
+                                                   else (255, 100, 100))
                 
-                self.left_surface.blit(name, (15, y + 8))
-                self.left_surface.blit(status, (200, y + 8))
+                self.left_surface.blit(name_text, (15, y + 8))
+                self.left_surface.blit(ip_text, (150, y + 8))
+                self.left_surface.blit(status_text, (280, y + 8))
             y += 45
         
-        # 绘制房间信息到右面板
+        # 绘制房间列表到右面板
         self.right_surface.fill((40, 40, 60))
-        if self.current_room:
-            room_info = [
-                f"房间号: {self.current_room.room_id}",
-                f"房主: {self.current_room.host.name}",
-                f"玩家2: {self.current_room.guest.name if self.current_room.guest else '等待加入'}",
-                f"状态: {self.current_room.status}"
-            ]
-            
+        if self.rooms:
             y = 60
-            for info in room_info:
-                text = self.small_font.render(info, True, (200, 200, 200))
-                self.right_surface.blit(text, (10, y))
-                y += 30
+            for room_id, room in self.rooms.items():
+                # 跳过自己创建的房间
+                if self.current_room and room_id == self.current_room.room_id:
+                    continue
+                    
+                # 绘制房间基本信息
+                room_text = self.small_font.render(
+                    f"房间: {room_id[:8]}...",
+                    True, (200, 200, 200)
+                )
+                host_text = self.small_font.render(
+                    f"主机: {room.host.name}",
+                    True, (200, 200, 200)
+                )
+                
+                # 显示房间状态
+                status_text = ""
+                if room.status == "等待中":
+                    status_text = "等待加入"
+                elif room.status == "准备中":
+                    if room.host_ready and room.guest_ready:
+                        status_text = "全部准备"
+                    else:
+                        ready_count = sum([room.host_ready, room.guest_ready])
+                        status_text = f"准备中({ready_count}/2)"
+                else:
+                    status_text = room.status
+                
+                status_render = self.small_font.render(
+                    status_text,
+                    True,
+                    (100, 255, 100) if room.status == "等待中" else 
+                    (255, 200, 100) if room.status == "准备中" else
+                    (255, 100, 100)
+                )
+                
+                self.right_surface.blit(room_text, (10, y))
+                self.right_surface.blit(host_text, (10, y + 20))
+                self.right_surface.blit(status_render, (10, y + 40))
+                
+                # 显示加入按钮（只对等待中的房间显示）
+                if (room.status == "等待中" and 
+                    not self.current_room and 
+                    room.host.ip != self.network.get_local_ip()):
+                    join_button = pygame.Rect(300, y, 50, 25)
+                    mouse_pos = pygame.mouse.get_pos()
+                    adjusted_pos = (
+                        mouse_pos[0] - self.right_panel.x,
+                        mouse_pos[1] - self.right_panel.y
+                    )
+                    
+                    if join_button.collidepoint(adjusted_pos):
+                        pygame.draw.rect(self.right_surface, (80, 80, 100), join_button)
+                    else:
+                        pygame.draw.rect(self.right_surface, (60, 60, 80), join_button)
+                    
+                    join_text = self.small_font.render("加入", True, (255, 255, 255))
+                    text_rect = join_text.get_rect(center=join_button.center)
+                    self.right_surface.blit(join_text, text_rect)
+                
+                y += 60
         else:
             self.right_surface.blit(self.cached_texts['no_room'], (10, 60))
         
@@ -303,24 +415,254 @@ class BattlePlatform:
                            (self.left_panel.right - 15, 
                             self.left_panel.top + scroll_pos, 10, 40))
         
+        # 在最后绘制房间浮窗
+        if self.network.current_room:
+            self.room_overlay.draw()
+        
         # 使用双缓冲更新显示
         pygame.display.flip() 
     
     def handle_button_click(self, button_name):
         """处理按钮点击事件"""
         try:
-            if button_name == 'refresh':
-                self.refresh_player_list()
-            elif button_name == 'create_room':
-                self.create_room()
-            elif button_name == 'ready':
-                self.toggle_ready()
-            elif button_name == 'start':
-                self.start_game()
-            elif button_name == 'leave':
-                self.leave_room()
+            if button_name == 'create_room':
+                room = self.network.create_room()
+                if room:
+                    self.current_room = room
+                    self.buttons['ready'].active = True
+                    self.buttons['leave'].active = True
+                    print("创建房间成功")
             
+            elif button_name == 'ready':
+                if self.current_room:
+                    self.network.send_ready_state(not self.network.is_ready)
+                    print(f"切换准备状态: {'已准备' if self.network.is_ready else '未准备'}")
+            
+            elif button_name == 'start':
+                if self.can_start_game():
+                    self.network.send_data({
+                        'type': 'start_game',
+                        'room_id': self.current_room.room_id
+                    })
+                    print("发送开始游戏请求")
+            
+            elif button_name == 'leave':
+                if self.current_room:
+                    self.network.send_data({
+                        'type': 'leave_room',
+                        'room_id': self.current_room.room_id,
+                        'player_ip': self.network.get_local_ip()
+                    })
+                    self.current_room = None
+                    self.buttons['ready'].active = False
+                    self.buttons['start'].active = False
+                    self.buttons['leave'].active = False
+                    print("离开房间")
+                    
         except Exception as e:
             print(f"按钮点击处理错误: {e}")
             import traceback
             traceback.print_exc()
+
+class RoomView:
+    def __init__(self, screen, room, network, font):
+        self.screen = screen
+        self.room = room
+        self.network = network
+        self.font = font
+        self.player_states = {}  # 存储玩家状态
+        self.opponent_score = 0
+        self.opponent_moves = 0
+        
+    def update(self, game_state=None):
+        """更新房间状态"""
+        if game_state:
+            if game_state['player_ip'] != self.network.get_local_ip():
+                self.opponent_score = game_state['score']
+                self.opponent_moves = game_state['moves_left']
+    
+    def draw(self):
+        """绘制房间界面"""
+        # 绘制房间信息面板
+        panel = pygame.Surface((300, 200))
+        panel.fill((40, 40, 60))
+        
+        # 绘制玩家信息
+        y = 20
+        # 房主信息
+        host_text = self.font.render(f"房主: {self.room.host.name}", True, (255, 255, 255))
+        host_status = self.font.render(
+            "已准备" if self.network.is_ready else "未准备", 
+            True, (100, 255, 100) if self.network.is_ready else (255, 100, 100)
+        )
+        panel.blit(host_text, (10, y))
+        panel.blit(host_status, (200, y))
+        
+        # 客人信息
+        if self.room.guest:
+            y += 40
+            guest_text = self.font.render(f"玩家: {self.room.guest.name}", True, (255, 255, 255))
+            guest_status = self.font.render(
+                "已准备" if self.network.opponent_ready else "未准备",
+                True, (100, 255, 100) if self.network.opponent_ready else (255, 100, 100)
+            )
+            panel.blit(guest_text, (10, y))
+            panel.blit(guest_status, (200, y))
+        
+        # 在游戏中显示对手信息
+        if self.room.status == "游戏中":
+            y += 40
+            score_text = self.font.render(f"对手分数: {self.opponent_score}", True, (255, 255, 255))
+            moves_text = self.font.render(f"对手步数: {self.opponent_moves}", True, (255, 255, 255))
+            panel.blit(score_text, (10, y))
+            panel.blit(moves_text, (200, y))
+        
+        # 绘制到屏幕
+        self.screen.blit(panel, (250, 200))
+
+class RoomOverlay:
+    def __init__(self, screen, network, font):
+        self.screen = screen
+        self.network = network
+        self.font = font
+        
+        # 浮窗位置和大小
+        window_width, window_height = screen.get_size()
+        self.width = 400
+        self.height = 300
+        self.x = (window_width - self.width) // 2
+        self.y = (window_height - self.height) // 2
+        
+        # 创建浮窗surface
+        self.surface = pygame.Surface((self.width, self.height))
+        self.rect = pygame.Rect(self.x, self.y, self.width, self.height)
+        
+        # 创建房间内的按钮
+        button_width = 120
+        button_height = 40
+        button_y = self.height - button_height - 20
+        
+        self.buttons = {
+            'ready': Button("准备", self.x + 20, self.y + button_y, 
+                          button_width, button_height, font=font),
+            'start': Button("开始游戏", self.x + 150, self.y + button_y, 
+                          button_width, button_height, active=False, font=font),
+            'leave': Button("离开房间", self.x + 280, self.y + button_y, 
+                          button_width, button_height, font=font)
+        }
+    
+    def update(self):
+        """更新房间状态和按钮"""
+        if self.network.current_room:
+            room = self.network.current_room
+            # 更新准备按钮状态和文本
+            is_ready = self.network.is_ready
+            self.buttons['ready'].text = "取消准备" if is_ready else "准备"
+            
+            # 更新开始按钮状态
+            is_host = room.host.ip == self.network.get_local_ip()
+            can_start = (
+                room.guest and                # 有客人加入
+                room.host_ready and           # 房主已准备
+                room.guest_ready and          # 客人已准备
+                is_host                       # 是房主
+            )
+            self.buttons['start'].active = can_start
+            
+            # 更新房间状态显示
+            if room.guest:
+                if is_host:
+                    room.host_ready = is_ready
+                else:
+                    room.guest_ready = is_ready
+    
+    def draw(self):
+        """绘制房间浮窗"""
+        if not self.network.current_room:
+            return
+            
+        # 绘制半透明背景
+        overlay = pygame.Surface((self.screen.get_width(), self.screen.get_height()))
+        overlay.fill((0, 0, 0))
+        overlay.set_alpha(128)
+        self.screen.blit(overlay, (0, 0))
+        
+        # 绘制房间窗口
+        self.surface.fill((40, 40, 60))
+        pygame.draw.rect(self.surface, (60, 60, 80), (0, 0, self.width, self.height), 2)
+        
+        # 绘制房间信息
+        room = self.network.current_room
+        is_host = room.host.ip == self.network.get_local_ip()
+        
+        # 房间标题
+        title = self.font.render(f"房间号: {room.room_id[:8]}...", True, (255, 255, 255))
+        self.surface.blit(title, (20, 20))
+        
+        # 房间状态
+        status_text = "等待玩家加入" if not room.guest else (
+            "全部准备完成" if room.host_ready and room.guest_ready else "等待准备"
+        )
+        status = self.font.render(status_text, True, (200, 200, 200))
+        self.surface.blit(status, (20, 140))
+        
+        # 房主信息
+        host_text = self.font.render(f"房主: {room.host.name}", True, (255, 255, 255))
+        host_ready = self.font.render(
+            "√ 已准备" if room.host_ready else "× 未准备",
+            True, (100, 255, 100) if room.host_ready else (255, 100, 100)
+        )
+        self.surface.blit(host_text, (20, 60))
+        self.surface.blit(host_ready, (200, 60))
+        
+        # 客人信息
+        if room.guest:
+            guest_text = self.font.render(f"玩家: {room.guest.name}", True, (255, 255, 255))
+            guest_ready = self.font.render(
+                "√ 已准备" if room.guest_ready else "× 未准备",
+                True, (100, 255, 100) if room.guest_ready else (255, 100, 100)
+            )
+            self.surface.blit(guest_text, (20, 100))
+            self.surface.blit(guest_ready, (200, 100))
+        else:
+            waiting_text = self.font.render("等待玩家加入...", True, (200, 200, 200))
+            self.surface.blit(waiting_text, (20, 100))
+        
+        # 绘制到屏幕
+        self.screen.blit(self.surface, (self.x, self.y))
+        
+        # 绘制按钮
+        for button in self.buttons.values():
+            button.draw(self.screen)
+    
+    def handle_event(self, event):
+        """处理房间内的事件"""
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            for name, button in self.buttons.items():
+                if button.clicked(event.pos):
+                    if name == 'ready':
+                        # 切换准备状态
+                        new_state = not self.network.is_ready
+                        self.network.send_ready_state(new_state)
+                        self.buttons['ready'].text = "取消准备" if new_state else "准备"
+                    elif name == 'start' and button.active:
+                        # 发送开始游戏消息
+                        try:
+                            self.network.send_data({
+                                'type': 'start_game',
+                                'room_id': self.network.current_room.room_id,
+                                'host_ip': self.network.current_room.host.ip
+                            })
+                            self.network.current_room.status = "游戏中"
+                            print("已发送开始游戏消息")
+                            return True  # 返回True触发游戏开始
+                        except Exception as e:
+                            print(f"发送开始游戏消息失败: {e}")
+                    elif name == 'leave':
+                        self.network.send_data({
+                            'type': 'leave_room',
+                            'room_id': self.network.current_room.room_id,
+                            'player_ip': self.network.get_local_ip()
+                        })
+                        return True  # 返回True表示离开房间
+        return False

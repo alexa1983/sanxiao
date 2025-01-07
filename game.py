@@ -333,6 +333,9 @@ class Game:
         if self.special_sound is not None:
             self.special_sound.set_volume(1.7)
         
+        # 设置网络管理器的回调函数
+        self.network.on_game_start = self.start_multiplayer_game
+        
         print("游戏初始化完成")
         print(f"当前游戏状态: {self.game_state}")
         print("网络大厅初始化完成")
@@ -416,6 +419,33 @@ class Game:
                 rendered_text = font.render(text, True, (255, 255, 255))
                 self.screen.blit(rendered_text, (10, y_offset))
                 y_offset += 28  # 进一步微调行间距
+            
+            # 在最后添加用户数据显示
+            if self.network and self.network.current_room:
+                # 创建半透明的状态显示背景
+                status_bg_width = 150
+                status_bg_height = 120
+                status_bg = pygame.Surface((status_bg_width, status_bg_height))
+                status_bg.fill((40, 40, 60))
+                status_bg.set_alpha(180)
+                self.screen.blit(status_bg, (WINDOW_WIDTH - status_bg_width - 10, 10))
+                
+                # 绘制用户数据
+                y_offset = 20
+                texts = [
+                    f"我方分数: {self.score}",
+                    f"我方步数: {self.moves}",
+                    f"对手分数: {self.network.opponent_score}",
+                    f"对手步数: {self.network.opponent_moves}"
+                ]
+                
+                for text in texts:
+                    rendered_text = self.font.render(text, True, (255, 50, 50))  # 使用红色
+                    self.screen.blit(rendered_text, 
+                                   (WINDOW_WIDTH - status_bg_width, y_offset))
+                    y_offset += 28
+            
+            pygame.display.flip()
             
         except Exception as e:
             print(f"绘制错误: {e}")
@@ -737,12 +767,14 @@ class Game:
                     elif self.menu_state == "LOBBY":
                         self.network_lobby.handle_event(event)
                     elif self.menu_state == "BATTLE":
-                        self.battle_platform.handle_event(event)
+                        result = self.battle_platform.handle_event(event)
+                        if result == "START_GAME":
+                            self.start_multiplayer_game()
                     
                 elif self.game_state == GameState.PLAYING:
                     self.handle_game_event(event)
             
-            # 根据游戏状态和菜单状态更新和绘制
+            # 更新和绘制
             if self.game_state == GameState.MENU:
                 if self.menu_state == "MAIN":
                     self.draw_main_menu()
@@ -750,10 +782,15 @@ class Game:
                     self.network_lobby.update()
                     self.network_lobby.draw()
                 elif self.menu_state == "BATTLE":
+                    self.battle_platform.update()
                     self.battle_platform.draw()
             elif self.game_state == GameState.PLAYING:
                 self.update(dt)
                 self.draw()
+                
+                # 如果是联机模式，广播游戏状态
+                if self.network and self.network.current_room:
+                    self.network.broadcast_game_state(self.score, self.moves)
             
             pygame.display.flip()
             self.clock.tick(60)
@@ -860,37 +897,55 @@ class Game:
             print(f"游戏初始化错误: {e}")
 
     def update(self, dt):
-        """更新游戏状态"""
-        try:
-            if self.game_state == GameState.PLAYING:
-                # 更新动画
-                if self.animating:
-                    any_removed = self.update_animations(dt)
-                    if any_removed:
-                        self.fill_empty()
-                        # 立即更新所有宝石的位置
-                        self.update_gem_positions(dt)
-                    elif not self.is_animating():
-                        self.animating = False
-                        if not self.remove_matches():
-                            if self.moves <= 0:
-                                print("游戏结束")
-                                self.game_state = GameState.MENU
-                                self.menu_state = "MAIN"
-                
-                # 更新宝石状态
-                self.update_gem_positions(dt)
-                
-                # 检查是否需要填充空位
-                if not self.animating and not self.is_animating():
-                    matches = self.find_matches()[0]
-                    if matches:
-                        self.animating = True
-                        self.remove_matches()
-        except Exception as e:
-            print(f"更新错误: {e}")
-            import traceback
-            traceback.print_exc()
+        if self.game_state == GameState.PLAYING:
+            # 更新游戏状态
+            if self.animating:
+                any_removed = self.update_animations(dt)
+                if any_removed:
+                    self.fill_empty()
+                    self.update_gem_positions(dt)
+                elif not self.is_animating():
+                    self.animating = False
+                    if not self.remove_matches():
+                        if self.moves <= 0:
+                            self.handle_game_end()
+            
+            # 广播游戏状态
+            if self.network and self.network.current_room:
+                self.network.broadcast_game_state(self.score, self.moves)
+
+    def handle_game_end(self):
+        """处理游戏结束"""
+        if self.network and self.network.current_room:
+            # 等待对手完成
+            if self.network.opponent_moves > 0:
+                self.show_waiting_dialog()
+            else:
+                # 判断胜负
+                is_winner = self.score > self.network.opponent_score
+                self.network.broadcast_game_result(is_winner)
+                self.show_result_dialog(is_winner)
+
+    def show_waiting_dialog(self):
+        """显示等待对手完成的对话框"""
+        dialog = pygame.Surface((400, 200))
+        dialog.fill((40, 40, 60))
+        text = self.font.render("等待对手完成游戏...", True, (255, 255, 255))
+        dialog.blit(text, (100, 80))
+        self.screen.blit(dialog, (200, 200))
+        pygame.display.flip()
+
+    def show_result_dialog(self, is_winner):
+        """显示游戏结果对话框"""
+        dialog = pygame.Surface((400, 200))
+        dialog.fill((40, 40, 60))
+        text = self.font.render(
+            "恭喜获胜！" if is_winner else "再接再厉！", 
+            True, (255, 255, 255)
+        )
+        dialog.blit(text, (150, 80))
+        self.screen.blit(dialog, (200, 200))
+        pygame.display.flip()
 
     def swap_gems(self, row1, col1, row2, col2):
         """交换两个宝石"""
@@ -932,6 +987,41 @@ class Game:
             import traceback
             traceback.print_exc()
             return False
+
+    def start_multiplayer_game(self):
+        """启动联机游戏"""
+        print("Starting multiplayer game...")
+        try:
+            if not self.network or not self.network.current_room:
+                print("错误：未连接到房间")
+                return
+            
+            if self.network.current_room.status != "游戏中":
+                print("错误：房间未处于游戏状态")
+                return
+            
+            self.game_state = GameState.PLAYING
+            self.menu_state = None  # 清除菜单状态
+            self.grid = [[None for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+            self.initialize_grid()
+            self.selected = None
+            self.score = 0
+            self.moves = 30
+            self.combo = 0
+            self.max_combo = 0
+            self.animating = False
+            
+            # 设置随机种子确保双方看到相同的初始布局
+            random.seed(int(self.network.current_room.room_id))
+            
+            print("联机游戏初始化完成")
+            print(f"房间ID: {self.network.current_room.room_id}")
+            print(f"玩家角色: {'房主' if self.network.current_room.host.ip == self.network.get_local_ip() else '访客'}")
+            
+        except Exception as e:
+            print(f"联机游戏初始化错误: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     game = Game()
